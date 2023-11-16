@@ -115,22 +115,24 @@ impl QgaWrapper {
     ) -> Result<<qga::guest_exec_status as QapiCommand>::Ok> {
         let mut qga = Qga::from_stream(&self.stream);
         let request = qga::guest_exec_status { pid };
-        match qga.execute(&request) {
-            // Retry on EAGAIN errors. EAGAIN and EWOULDBLOCK are both
-            // interpreted as ErrorKind::WouldBlock but that's OK
-            // since those are the same code in Linux and our stream
-            // isn't non-blocking so EWOULDBLOCK isn't a sensible
-            // error anyway
-            Err(qapi::ExecuteError::Io(io_error))
-                if io_error.kind() == io::ErrorKind::WouldBlock =>
-            {
-                warn!("QGA guest exec status got EAGAIN, retrying: {io_error}");
-                thread::sleep(Duration::from_secs(1));
-                qga.execute(&request)
+        let mut retries_left: u16 = 30;
+        let mut res = qga.execute(&request);
+        while let Err(qapi::ExecuteError::Io(io_error)) = &res {
+            if io_error.kind() != io::ErrorKind::WouldBlock {
+                break;
             }
-            other => other,
+
+            let Some(left) = retries_left.checked_sub(1) else {
+                break;
+            };
+
+            warn!("QGA guest exec status got EAGAIN, retrying: {io_error}");
+            thread::sleep(Duration::from_secs(1));
+            retries_left = left;
+            res = qga.execute(&request);
         }
-        .context("error running guest_exec_status")
+
+        res.context("error running guest_exec_status")
     }
 
     /// Version triple of the guest agent (in the guest of course)
