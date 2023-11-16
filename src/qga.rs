@@ -1,8 +1,8 @@
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::thread;
 use std::time::{Duration, Instant};
+use std::{io, thread};
 
 use anyhow::{anyhow, bail, Context, Result};
 use log::{debug, error, info, warn};
@@ -114,8 +114,23 @@ impl QgaWrapper {
         pid: i64,
     ) -> Result<<qga::guest_exec_status as QapiCommand>::Ok> {
         let mut qga = Qga::from_stream(&self.stream);
-        qga.execute(&qga::guest_exec_status { pid })
-            .context("error running guest_exec_status")
+        let request = qga::guest_exec_status { pid };
+        match qga.execute(&request) {
+            // Retry on EAGAIN errors. EAGAIN and EWOULDBLOCK are both
+            // interpreted as ErrorKind::WouldBlock but that's OK
+            // since those are the same code in Linux and our stream
+            // isn't non-blocking so EWOULDBLOCK isn't a sensible
+            // error anyway
+            Err(qapi::ExecuteError::Io(io_error))
+                if io_error.kind() == io::ErrorKind::WouldBlock =>
+            {
+                warn!("QGA guest exec status got EAGAIN, retrying: {io_error}");
+                thread::sleep(Duration::from_secs(1));
+                qga.execute(&request)
+            }
+            other => other,
+        }
+        .context("error running guest_exec_status")
     }
 
     /// Version triple of the guest agent (in the guest of course)
